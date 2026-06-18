@@ -1,0 +1,1 @@
+Summarize the transcript into markdown meeting minutes with sections for Summary, Decisions, and Action Items.

@@ -1,0 +1,2 @@
+Determine whether the Discord message appears to describe a task that should be logged in Plane.
+Return YES or NO.
