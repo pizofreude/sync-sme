@@ -1,0 +1,1 @@
+Write a concise morning briefing in markdown covering pending tasks, upcoming deadlines, and missing logged tasks.
