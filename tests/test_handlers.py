@@ -71,6 +71,25 @@ def test_handler_creates_issue_for_actionable_messages():
     assert message.reactions == ["✅"]
 
 
+def test_handler_ignores_bot_authored_messages():
+    parser = FakeParser(ParsedTask(title="Ship demo"))
+    plane = FakePlane()
+    store = FakeStateStore()
+    handler = build_message_handler(parser, plane, store)
+    message = FakeMessage(
+        id=2,
+        content="todo: ship the demo",
+        author=FakeAuthor(bot=True),
+    )
+
+    result = asyncio.run(handler(message))
+
+    assert result == "ignored-bot"
+    assert plane.created == []
+    assert store.processed == set()
+    assert message.reactions == []
+
+
 def test_handler_reacts_with_failure_when_parser_returns_none():
     parser = FakeParser(None)
     plane = FakePlane()
