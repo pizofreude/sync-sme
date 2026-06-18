@@ -118,3 +118,8 @@ def test_handler_ignores_non_actionable_duplicate_and_wrong_channel_messages():
     assert asyncio.run(handler(quiet)) == "ignored-non-actionable"
     assert asyncio.run(handler(wrong_channel)) == "ignored-channel"
     assert plane.created == []
+
+    # Ignored messages must not receive reactions
+    assert duplicate.reactions == []
+    assert quiet.reactions == []
+    assert wrong_channel.reactions == []
