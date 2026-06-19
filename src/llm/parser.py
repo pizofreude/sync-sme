@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "parse_task.txt"
+from llm.prompts import resolve_prompt
+
+PROMPT_PATH = resolve_prompt("parse_task.txt")
 
 
 @dataclass(slots=True)

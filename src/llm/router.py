@@ -28,7 +28,7 @@ class NineRouterClient:
             self.endpoint,
             data=payload,
             headers={
-                "Authorization": f"******",
+                "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
             method="POST",

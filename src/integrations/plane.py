@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -40,11 +41,14 @@ class PlaneCLI:
         if task.details:
             command.extend(["--description", task.details])
 
+        # Passing a list (not a shell string) — subprocess.run does NOT invoke a shell,
+        # so this is safe from command injection even with user-derived task fields.
         completed = subprocess.run(
             command,
             check=True,
             capture_output=True,
             text=True,
+            shell=False,
         )
         issue_id = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else task.title
         return CreatedIssue(identifier=issue_id, output=completed.stdout)

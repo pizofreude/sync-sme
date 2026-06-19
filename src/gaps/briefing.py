@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "daily_briefing.txt"
+from llm.prompts import resolve_prompt
+
+PROMPT_PATH = resolve_prompt("daily_briefing.txt")
 
 
 class Router(Protocol):

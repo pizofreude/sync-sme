@@ -123,3 +123,62 @@ def test_handler_ignores_non_actionable_duplicate_and_wrong_channel_messages():
     assert duplicate.reactions == []
     assert quiet.reactions == []
     assert wrong_channel.reactions == []
+
+
+def test_handler_uses_custom_action_items_channel():
+    parser = FakeParser(ParsedTask(title="Custom channel task"))
+    plane = FakePlane()
+    store = FakeStateStore()
+    handler = build_message_handler(parser, plane, store, action_items_channel="team-tasks")
+    message = FakeMessage(id=10, content="todo: ship feature", channel=FakeChannel(name="team-tasks"))
+
+    result = asyncio.run(handler(message))
+
+    assert result == "created"
+    assert plane.created == [ParsedTask(title="Custom channel task")]
+    assert store.processed == {10}
+    assert message.reactions == ["✅"]
+
+
+def test_handler_ignores_default_channel_when_custom_configured():
+    parser = FakeParser(ParsedTask(title="Should not be created"))
+    plane = FakePlane()
+    store = FakeStateStore()
+    handler = build_message_handler(parser, plane, store, action_items_channel="team-tasks")
+    message = FakeMessage(id=11, content="todo: from default channel", channel=FakeChannel(name="action-items"))
+
+    result = asyncio.run(handler(message))
+
+    assert result == "ignored-channel"
+    assert plane.created == []
+    assert store.processed == set()
+    assert message.reactions == []
+
+
+def test_handler_uses_custom_trigger_keywords():
+    parser = FakeParser(ParsedTask(title="Triggered task"))
+    plane = FakePlane()
+    store = FakeStateStore()
+    handler = build_message_handler(parser, plane, store, trigger_keywords=["remind me to"])
+    message = FakeMessage(id=12, content="remind me to deploy the app")
+
+    result = asyncio.run(handler(message))
+
+    assert result == "created"
+    assert plane.created == [ParsedTask(title="Triggered task")]
+    assert message.reactions == ["✅"]
+
+
+def test_handler_ignores_messages_without_custom_trigger_keywords():
+    parser = FakeParser(ParsedTask(title="Should not be created"))
+    plane = FakePlane()
+    store = FakeStateStore()
+    handler = build_message_handler(parser, plane, store, trigger_keywords=["remind me to"])
+    message = FakeMessage(id=13, content="todo: ship the demo")
+
+    result = asyncio.run(handler(message))
+
+    assert result == "ignored-non-actionable"
+    assert plane.created == []
+    assert store.processed == set()
+    assert message.reactions == []

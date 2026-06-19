@@ -37,6 +37,8 @@ class BotSettings:
         raw_assignee_map = os.getenv("PLANE_ASSIGNEE_MAP", "")
         assignee_map = {}
         for item in filter(None, (entry.strip() for entry in raw_assignee_map.split(","))):
+            if ":" not in item:
+                continue  # skip malformed entries instead of crashing
             discord_id, plane_member = item.split(":", 1)
             assignee_map[discord_id.strip()] = plane_member.strip()
         return cls(
