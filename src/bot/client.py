@@ -28,6 +28,7 @@ class BotSettings:
     plane_workspace_slug: str
     action_items_channel: str = "action-items"
     llm_model: str = "nvidia/llama-3.1-70b-instruct"
+    ninerouter_endpoint: str = "https://9router.com/api/v1/chat/completions"
     state_db_path: str = "sync_sme.db"
     plane_assignee_map: dict[str, str] = field(default_factory=dict)
 
@@ -47,6 +48,7 @@ class BotSettings:
             plane_workspace_slug=os.getenv("PLANE_WORKSPACE_SLUG", ""),
             action_items_channel=os.getenv("ACTION_ITEMS_CHANNEL", "action-items"),
             llm_model=os.getenv("LLM_MODEL", "nvidia/llama-3.1-70b-instruct"),
+            ninerouter_endpoint=os.getenv("NINEROUTER_ENDPOINT", "https://9router.com/api/v1/chat/completions"),
             state_db_path=os.getenv("SYNC_SME_DB_PATH", "sync_sme.db"),
             plane_assignee_map=assignee_map,
         )
@@ -60,7 +62,7 @@ def create_client(settings: BotSettings):
     intents.message_content = True
     client = discord.Client(intents=intents)
 
-    router = NineRouterClient(api_key=settings.ninerouter_api_key, model=settings.llm_model)
+    router = NineRouterClient(api_key=settings.ninerouter_api_key, model=settings.llm_model, endpoint=settings.ninerouter_endpoint)
     parser = TaskParser(router=router)
     plane = PlaneCLI(
         workspace_slug=settings.plane_workspace_slug,

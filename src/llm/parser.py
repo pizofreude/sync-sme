@@ -42,7 +42,13 @@ class TaskParser:
         try:
             payload = json.loads(raw_response)
         except json.JSONDecodeError:
-            return None
+            # LLMs often wrap JSON in markdown code fences — strip them
+            import re
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_response.strip(), flags=re.MULTILINE).strip()
+            try:
+                payload = json.loads(cleaned)
+            except json.JSONDecodeError:
+                return None
 
         title = str(payload.get("title", "")).strip()
         if not title:

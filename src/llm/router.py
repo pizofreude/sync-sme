@@ -33,6 +33,8 @@ class NineRouterClient:
             },
             method="POST",
         )
-        with request.urlopen(req, timeout=30) as response:  # nosec B310 - fixed HTTPS API endpoint
-            body = json.loads(response.read().decode("utf-8"))
+        with request.urlopen(req, timeout=60) as response:  # nosec B310 - fixed HTTPS API endpoint
+            raw = response.read().decode("utf-8")
+        # Use raw_decode to handle trailing SSE data (e.g. "data: [DONE]")
+        body, _ = json.JSONDecoder().raw_decode(raw)
         return body["choices"][0]["message"]["content"]
