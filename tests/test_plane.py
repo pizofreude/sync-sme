@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from unittest.mock import patch
 
@@ -126,3 +128,83 @@ def test_plane_cli_falls_back_to_title_when_stdout_empty(run_mock, stdout_value)
 
     run_mock.assert_called_once()
     assert issue.identifier == task.title
+
+
+# --- Assignee mapping verification (Day 1) ---
+
+
+def test_plane_cli_resolves_mapped_discord_mention():
+    """Verify a mapped Discord mention resolves to the Plane member."""
+    client = PlaneCLI(
+        workspace_slug="ws",
+        assignee_map={"111": "alice-plane", "222": "bob-plane"},
+    )
+    assert client._resolve_assignee("<@111>") == "alice-plane"
+    assert client._resolve_assignee("<@222>") == "bob-plane"
+
+
+def test_plane_cli_resolves_nick_format_mention():
+    """Verify nick-format mentions (<@!111>) also resolve correctly."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={"111": "alice-plane"})
+    assert client._resolve_assignee("<@!111>") == "alice-plane"
+
+
+def test_plane_cli_passes_through_unmapped_mention():
+    """Verify unmapped mentions are passed through as-is."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={"111": "alice-plane"})
+    assert client._resolve_assignee("<@999>") == "<@999>"
+
+
+def test_plane_cli_passes_through_plain_name():
+    """Verify plain text assignees pass through unchanged."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={"111": "alice-plane"})
+    assert client._resolve_assignee("John Doe") == "John Doe"
+
+
+def test_plane_cli_handles_none_assignee():
+    """Verify None assignee returns None."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={})
+    assert client._resolve_assignee(None) is None
+
+
+def test_plane_cli_handles_empty_assignee_map():
+    """Verify empty assignee map passes through all mentions."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={})
+    assert client._resolve_assignee("<@123>") == "<@123>"
+
+
+# --- Dry-run mode (Day 1 e2e fallback) ---
+
+
+def test_plane_cli_dry_run_does_not_call_subprocess():
+    """Verify dry-run mode logs instead of calling the CLI."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={}, dry_run=True)
+
+    issue = client.create_issue(ParsedTask(
+        title="Dry run task",
+        assignee="Alice",
+        due_date="2026-06-22",
+        details="Should not call plane CLI",
+    ))
+
+    assert issue.identifier == "dry-run:Dry run task"
+    assert "DRY-RUN" in issue.output
+    assert "Dry run task" in issue.output
+
+
+def test_plane_cli_dry_run_logs_assignee_and_details(caplog):
+    """Verify dry-run output includes all task fields."""
+    client = PlaneCLI(workspace_slug="ws", assignee_map={}, dry_run=True)
+
+    with caplog.at_level(logging.WARNING):
+        client.create_issue(ParsedTask(
+            title="Task with details",
+            assignee="Bob",
+            due_date="2026-06-23",
+            details="Important context",
+        ))
+
+    assert "Task with details" in caplog.text
+    assert "Bob" in caplog.text
+    assert "2026-06-23" in caplog.text
+    assert "Important context" in caplog.text

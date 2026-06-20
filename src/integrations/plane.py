@@ -1,13 +1,15 @@
-"""Plane.so Prime CLI wrapper."""
+"""Plane.so Prime CLI wrapper with graceful dry-run fallback."""
 
 from __future__ import annotations
 
+import logging
 import re
-import shlex
 import subprocess
 from dataclasses import dataclass
 
 from llm.parser import ParsedTask
+
+logger = logging.getLogger(__name__)
 
 MENTION_PATTERN = re.compile(r"^<@!?(\d+)>$")
 
@@ -23,8 +25,14 @@ class PlaneCLI:
     workspace_slug: str
     assignee_map: dict[str, str] | None = None
     executable: str = "plane"
+    dry_run: bool = False
 
     def create_issue(self, task: ParsedTask) -> CreatedIssue:
+        assignee = self._resolve_assignee(task.assignee)
+
+        if self.dry_run:
+            return self._dry_run_create(task, assignee)
+
         command = [
             self.executable,
             "create-issue",
@@ -33,7 +41,6 @@ class PlaneCLI:
             "--title",
             task.title,
         ]
-        assignee = self._resolve_assignee(task.assignee)
         if assignee:
             command.extend(["--assignee", assignee])
         if task.due_date:
@@ -52,6 +59,18 @@ class PlaneCLI:
         )
         issue_id = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else task.title
         return CreatedIssue(identifier=issue_id, output=completed.stdout)
+
+    def _dry_run_create(self, task: ParsedTask, assignee: str | None) -> CreatedIssue:
+        """Log the issue that would be created without calling the CLI."""
+        parts = [f"[DRY-RUN] Would create Plane issue: \"{task.title}\""]
+        if assignee:
+            parts.append(f"  assignee: {assignee}")
+        if task.due_date:
+            parts.append(f"  due_date: {task.due_date}")
+        if task.details:
+            parts.append(f"  details: {task.details}")
+        logger.warning("\n".join(parts))
+        return CreatedIssue(identifier=f"dry-run:{task.title}", output="\n".join(parts))
 
     def _resolve_assignee(self, assignee: str | None) -> str | None:
         if not assignee:
