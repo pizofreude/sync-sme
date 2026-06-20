@@ -12,22 +12,27 @@ from dotenv import load_dotenv
 
 from bot.handlers import build_message_handler
 from db.models import SQLiteStateStore
+from gaps.briefing import DailyBriefingGenerator
+from gaps.detector import GapDetector
+from gaps.tracker import GapTracker
+from integrations.craig import CraigClient
+from integrations.obsidian import ObsidianWriter
 from integrations.plane import PlaneCLI
 from llm.parser import TaskParser
 from llm.router import NineRouterClient
 from llm.summarizer import MeetingSummarizer
-from integrations.obsidian import ObsidianWriter
 from meeting.pipeline import MeetingPipeline
 from meeting.recorder import CraigRecorder
 from meeting.transcriber import WhisperTranscriber
-from integrations.craig import CraigClient
 
 logger = logging.getLogger(__name__)
 
 try:
     import discord
-except ImportError:  # pragma: no cover - exercised only in runtime environments without discord.py
+    from discord.ext import tasks
+except ImportError:  # pragma: no cover
     discord = None
+    tasks = None
 
 
 @dataclass(slots=True)
@@ -47,6 +52,10 @@ class BotSettings:
     whisper_model: str = "base"
     plane_api_token: str = ""
     plane_project_id: str = ""
+    # Day 3: gap detection + briefing
+    gap_detection_hours: int = 24
+    briefing_cron_hour: int = 9
+    briefing_cron_minute: int = 0
 
     @classmethod
     def from_env(cls) -> "BotSettings":
@@ -55,16 +64,26 @@ class BotSettings:
         assignee_map = {}
         for item in filter(None, (entry.strip() for entry in raw_assignee_map.split(","))):
             if ":" not in item:
-                continue  # skip malformed entries instead of crashing
+                continue
             discord_id, plane_member = item.split(":", 1)
             assignee_map[discord_id.strip()] = plane_member.strip()
 
         vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "")
-        # Expand ~ and $HOME to user home directory
         if vault_path.startswith("~"):
             vault_path = str(Path(vault_path).expanduser())
         elif "$HOME" in vault_path:
             vault_path = vault_path.replace("$HOME", str(Path.home()))
+
+        # Parse BRIEFING_CRON (format: "MM HH * * *")
+        cron_hour, cron_minute = 9, 0
+        raw_cron = os.getenv("BRIEFING_CRON", "0 9 * * *")
+        parts = raw_cron.split()
+        if len(parts) >= 2:
+            try:
+                cron_minute = int(parts[0])
+                cron_hour = int(parts[1])
+            except ValueError:
+                pass
 
         return cls(
             discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
@@ -81,16 +100,18 @@ class BotSettings:
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
             plane_api_token=os.getenv("PLANE_API_TOKEN", ""),
             plane_project_id=os.getenv("PLANE_PROJECT_ID", ""),
+            gap_detection_hours=int(os.getenv("GAP_DETECTION_HOURS", "24")),
+            briefing_cron_hour=cron_hour,
+            briefing_cron_minute=cron_minute,
         )
 
 
 def _detect_plane_cli() -> bool:
-    """Check if the ``plane`` CLI binary is on PATH."""
     return shutil.which("plane") is not None
 
 
 def create_client(settings: BotSettings):
-    if discord is None:  # pragma: no cover - depends on optional runtime dependency
+    if discord is None:
         raise RuntimeError("discord.py must be installed to create the Discord client")
 
     intents = discord.Intents.default()
@@ -111,16 +132,25 @@ def create_client(settings: BotSettings):
     )
 
     state_store = SQLiteStateStore(settings.state_db_path)
+
+    # Day 3: Gap tracker + detector
+    gap_tracker = GapTracker(db_path=settings.state_db_path)
+    gap_detector = GapDetector(tracker=gap_tracker, detection_hours=settings.gap_detection_hours)
+
+    # Day 3: Daily briefing generator
+    briefing_generator = DailyBriefingGenerator(router=router)
+    obsidian = ObsidianWriter(vault_path=Path(settings.obsidian_vault_path)) if settings.obsidian_vault_path else None
+
     on_message = build_message_handler(
         task_parser=parser,
         plane_client=plane,
         state_store=state_store,
         action_items_channel=settings.action_items_channel,
+        gap_tracker=gap_tracker,
     )
 
-    # Day 2: Meeting pipeline (wired but triggered only when Craig recordings arrive)
+    # Day 2: Meeting pipeline
     summarizer = MeetingSummarizer(router=router)
-    obsidian = ObsidianWriter(vault_path=Path(settings.obsidian_vault_path)) if settings.obsidian_vault_path else None
     meeting_pipeline = None
     if settings.craig_api_key and obsidian:
         craig_client = CraigClient(api_key=settings.craig_api_key, base_url=settings.craig_api_base)
@@ -134,19 +164,60 @@ def create_client(settings: BotSettings):
             plane=plane,
         )
         logger.info("Meeting pipeline wired: Craig → Whisper → Obsidian → Plane")
-    else:
-        if not settings.craig_api_key:
-            logger.info("CRAIG_API_KEY not set — meeting pipeline disabled")
+
+    # Day 3: Scheduled daily briefing task
+    @tasks.loop(hours=24)
+    async def daily_briefing_task():
+        """Generate and post the daily briefing."""
         if not obsidian:
-            logger.info("OBSIDIAN_VAULT_PATH not set — meeting pipeline disabled")
+            logger.warning("Obsidian not configured — skipping daily briefing")
+            return
+
+        candidates = gap_detector.detect()
+        gaps_section = gap_detector.format_briefing_section(candidates)
+
+        # TODO: Pull real pending tasks from Plane API when available
+        pending_tasks = "Plane integration pending — set PLANE_API_TOKEN to enable."
+        upcoming_deadlines = "No deadline data available yet."
+
+        try:
+            briefing, path = briefing_generator.generate_and_write(
+                pending_tasks=pending_tasks,
+                upcoming_deadlines=upcoming_deadlines,
+                gaps_detected=gaps_section,
+                obsidian=obsidian,
+            )
+            logger.info("Daily briefing written to %s", path)
+        except Exception:
+            logger.exception("Failed to generate daily briefing")
+
+    @daily_briefing_task.before_loop
+    async def before_daily_briefing():
+        """Wait until the bot is ready before starting the briefing loop."""
+        await client.wait_until_ready()
 
     @client.event
     async def on_ready():
         print(f"Logged in as {client.user}")
+
+        # Status summary
+        features = []
         if meeting_pipeline:
-            print("Meeting pipeline: ACTIVE (Craig → Whisper → Obsidian → Plane)")
+            features.append("Meeting pipeline: ACTIVE")
         else:
-            print("Meeting pipeline: DISABLED (set CRAIG_API_KEY + OBSIDIAN_VAULT_PATH to enable)")
+            features.append("Meeting pipeline: DISABLED")
+        features.append(f"Gap detection: ACTIVE ({settings.gap_detection_hours}h window)")
+        features.append(f"Daily briefing: {settings.briefing_cron_hour:02d}:{settings.briefing_cron_minute:02d} MYT")
+        if obsidian:
+            features.append(f"Obsidian vault: {settings.obsidian_vault_path}")
+        else:
+            features.append("Obsidian: DISABLED")
+        for f in features:
+            print(f"  {f}")
+
+        # Start the daily briefing scheduler
+        if not daily_briefing_task.is_running():
+            daily_briefing_task.start()
 
     @client.event
     async def on_message(message):

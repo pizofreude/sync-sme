@@ -46,7 +46,19 @@ def build_message_handler(
     state_store: MessageStateStore,
     action_items_channel: str = "action-items",
     trigger_keywords: Sequence[str] = DEFAULT_TRIGGER_KEYWORDS,
+    gap_tracker: object | None = None,
 ) -> Callable[[object], Awaitable[str]]:
+    """Build the on_message handler for Discord.
+
+    Args:
+        task_parser: LLM-backed task parser.
+        plane_client: Plane issue creator.
+        state_store: SQLite-backed dedup store.
+        action_items_channel: Channel name to monitor.
+        trigger_keywords: Phrases that indicate a message is actionable.
+        gap_tracker: Optional GapTracker for tracking non-actionable messages
+            as potential task candidates (Day 3 gap detection).
+    """
     async def on_message(message: object) -> str:
         channel = getattr(getattr(message, "channel", None), "name", "")
         if channel != action_items_channel:
@@ -62,6 +74,15 @@ def build_message_handler(
 
         content = getattr(message, "content", "")
         if not is_actionable_message(content, trigger_keywords):
+            # Track non-actionable messages as gap candidates
+            if gap_tracker is not None:
+                author_name = getattr(author, "name", "") or getattr(author, "display_name", "")
+                gap_tracker.remember(
+                    message_id=message_id,
+                    content=content,
+                    channel=channel,
+                    author=author_name,
+                )
             return "ignored-non-actionable"
 
         task = task_parser.parse_message(content)
@@ -71,6 +92,9 @@ def build_message_handler(
 
         plane_client.create_issue(task)
         state_store.mark_processed(message_id)
+        # If this message was previously a gap candidate, resolve it
+        if gap_tracker is not None:
+            gap_tracker.resolve(message_id)
         await message.add_reaction("✅")
         return "created"
 
