@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from llm.parser import ParsedTask, TaskParser
@@ -15,6 +15,9 @@ DEFAULT_TRIGGER_KEYWORDS = (
     "todo",
     "follow up",
 )
+
+# Type for the reaction callback: (channel_id, message_id, emoji) -> None
+AddReactionFn = Callable[[str, str, str], None]
 
 
 @dataclass(slots=True)
@@ -40,6 +43,10 @@ def is_actionable_message(content: str, trigger_keywords: Sequence[str] = DEFAUL
     return any(keyword in lowered for keyword in trigger_keywords)
 
 
+def _noop_reaction(channel_id: str, message_id: str, emoji: str) -> None:
+    """Default no-op reaction callback for testing."""
+
+
 def build_message_handler(
     task_parser: TaskParser,
     plane_client: PlaneIssueCreator,
@@ -47,7 +54,8 @@ def build_message_handler(
     action_items_channel: str = "action-items",
     trigger_keywords: Sequence[str] = DEFAULT_TRIGGER_KEYWORDS,
     gap_tracker: object | None = None,
-) -> Callable[[object], Awaitable[str]]:
+    add_reaction: AddReactionFn | None = None,
+) -> Callable[[object], str]:
     """Build the on_message handler for Discord.
 
     Args:
@@ -58,8 +66,12 @@ def build_message_handler(
         trigger_keywords: Phrases that indicate a message is actionable.
         gap_tracker: Optional GapTracker for tracking non-actionable messages
             as potential task candidates (Day 3 gap detection).
+        add_reaction: Callback ``(channel_id, message_id, emoji) -> None``
+            for adding reactions. Falls back to a no-op if not provided.
     """
-    async def on_message(message: object) -> str:
+    react = add_reaction or _noop_reaction
+
+    def on_message(message: object) -> str:
         channel = getattr(getattr(message, "channel", None), "name", "")
         if channel != action_items_channel:
             return "ignored-channel"
@@ -68,7 +80,7 @@ def build_message_handler(
         if getattr(author, "bot", False):
             return "ignored-bot"
 
-        message_id = getattr(message, "id")
+        message_id = str(getattr(message, "id"))
         if state_store.is_processed(message_id):
             return "ignored-duplicate"
 
@@ -87,7 +99,7 @@ def build_message_handler(
 
         task = task_parser.parse_message(content)
         if not task:
-            await message.add_reaction("❌")
+            react(channel, message_id, "❌")
             return "parse-failed"
 
         plane_client.create_issue(task)
@@ -95,7 +107,7 @@ def build_message_handler(
         # If this message was previously a gap candidate, resolve it
         if gap_tracker is not None:
             gap_tracker.resolve(message_id)
-        await message.add_reaction("✅")
+        react(channel, message_id, "✅")
         return "created"
 
     return on_message

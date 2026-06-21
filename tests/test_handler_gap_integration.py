@@ -1,6 +1,5 @@
 """Integration tests for message handler + gap tracker interaction."""
 
-import asyncio
 from dataclasses import dataclass, field
 
 from bot.handlers import build_message_handler
@@ -18,14 +17,18 @@ class FakeGapTracker:
 
     def remember(self, message_id, content, channel="", author=""):
         self.remembered.append({
-            "message_id": message_id,
+            "message_id": str(message_id),
             "content": content,
             "channel": channel,
             "author": author,
         })
 
     def resolve(self, message_id):
-        self.resolved.append(message_id)
+        self.resolved.append(str(message_id))
+
+
+def _noop_reaction(channel_id: str, message_id: str, emoji: str) -> None:
+    pass
 
 
 def test_non_actionable_message_tracked_as_gap_candidate():
@@ -34,14 +37,14 @@ def test_non_actionable_message_tracked_as_gap_candidate():
     plane = FakePlane()
     store = FakeStateStore()
     gap_tracker = FakeGapTracker()
-    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker)
+    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker, add_reaction=_noop_reaction)
 
     message = FakeMessage(id=50, content="just chatting about the weather")
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "ignored-non-actionable"
     assert len(gap_tracker.remembered) == 1
-    assert gap_tracker.remembered[0]["message_id"] == 50
+    assert gap_tracker.remembered[0]["message_id"] == "50"
     assert gap_tracker.remembered[0]["content"] == "just chatting about the weather"
 
 
@@ -51,10 +54,10 @@ def test_actionable_message_not_tracked_as_gap():
     plane = FakePlane()
     store = FakeStateStore()
     gap_tracker = FakeGapTracker()
-    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker)
+    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker, add_reaction=_noop_reaction)
 
     message = FakeMessage(id=51, content="todo: deploy the app")
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "created"
     assert len(gap_tracker.remembered) == 0
@@ -66,12 +69,12 @@ def test_successful_creation_resolves_gap_candidate():
     plane = FakePlane()
     store = FakeStateStore()
     gap_tracker = FakeGapTracker()
-    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker)
+    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker, add_reaction=_noop_reaction)
 
     message = FakeMessage(id=52, content="todo: deploy the app")
-    asyncio.run(handler(message))
+    handler(message)
 
-    assert 52 in gap_tracker.resolved
+    assert "52" in gap_tracker.resolved
 
 
 def test_wrong_channel_messages_not_tracked():
@@ -80,10 +83,10 @@ def test_wrong_channel_messages_not_tracked():
     plane = FakePlane()
     store = FakeStateStore()
     gap_tracker = FakeGapTracker()
-    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker)
+    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker, add_reaction=_noop_reaction)
 
     message = FakeMessage(id=53, content="random message", channel=FakeChannel(name="general"))
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "ignored-channel"
     assert len(gap_tracker.remembered) == 0
@@ -95,10 +98,10 @@ def test_bot_messages_not_tracked():
     plane = FakePlane()
     store = FakeStateStore()
     gap_tracker = FakeGapTracker()
-    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker)
+    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker, add_reaction=_noop_reaction)
 
     message = FakeMessage(id=54, content="bot says hi", author=FakeAuthor(bot=True))
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "ignored-bot"
     assert len(gap_tracker.remembered) == 0
@@ -109,10 +112,10 @@ def test_handler_works_without_gap_tracker():
     parser = FakeParser(ParsedTask(title="Task"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store, gap_tracker=None)
+    handler = build_message_handler(parser, plane, store, gap_tracker=None, add_reaction=_noop_reaction)
 
     message = FakeMessage(id=55, content="just chatting")
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "ignored-non-actionable"
 
@@ -123,7 +126,7 @@ def test_gap_tracker_receives_channel_and_author():
     plane = FakePlane()
     store = FakeStateStore()
     gap_tracker = FakeGapTracker()
-    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker)
+    handler = build_message_handler(parser, plane, store, gap_tracker=gap_tracker, add_reaction=_noop_reaction)
 
     message = FakeMessage(
         id=56,
@@ -131,7 +134,7 @@ def test_gap_tracker_receives_channel_and_author():
         channel=FakeChannel(name="action-items"),
         author=FakeAuthor(bot=False),
     )
-    asyncio.run(handler(message))
+    handler(message)
 
     assert len(gap_tracker.remembered) == 1
     assert gap_tracker.remembered[0]["channel"] == "action-items"

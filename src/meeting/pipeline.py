@@ -13,7 +13,7 @@ from integrations.plane import CreatedIssue, PlaneCLI
 from llm.parser import ParsedTask, TaskParser
 from llm.summarizer import MeetingSummarizer
 from meeting.recorder import CraigRecorder
-from meeting.transcriber import WhisperTranscriber
+from meeting.transcriber import SpeechmaticsTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ Return [] if no action items found. Return ONLY valid JSON, no markdown fences."
 @dataclass(slots=True)
 class MeetingPipeline:
     recorder: CraigRecorder
-    transcriber: WhisperTranscriber
+    transcriber: SpeechmaticsTranscriber
     summarizer: MeetingSummarizer
     obsidian: ObsidianWriter
     plane: PlaneCLI
@@ -46,7 +46,7 @@ class MeetingPipeline:
         logger.info("Fetching recording %s", recording_id)
         audio_path.write_bytes(self.recorder.fetch_audio(recording_id))
 
-        logger.info("Transcribing audio with Whisper")
+        logger.info("Transcribing audio with Speechmatics")
         transcript = self.transcriber.transcribe(audio_path)
 
         logger.info("Summarizing transcript")

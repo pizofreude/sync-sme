@@ -1,10 +1,13 @@
-"""Discord client bootstrap helpers."""
+"""Discord client bootstrap — powered by discli (serve mode)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,16 +26,9 @@ from llm.router import NineRouterClient
 from llm.summarizer import MeetingSummarizer
 from meeting.pipeline import MeetingPipeline
 from meeting.recorder import CraigRecorder
-from meeting.transcriber import WhisperTranscriber
+from meeting.transcriber import SpeechmaticsTranscriber
 
 logger = logging.getLogger(__name__)
-
-try:
-    import discord
-    from discord.ext import tasks
-except ImportError:  # pragma: no cover
-    discord = None
-    tasks = None
 
 
 @dataclass(slots=True)
@@ -49,7 +45,7 @@ class BotSettings:
     craig_api_key: str = ""
     craig_api_base: str = "https://craig.chat/api"
     obsidian_vault_path: str = ""
-    whisper_model: str = "base"
+    speechmatics_api_key: str = ""
     plane_api_token: str = ""
     plane_project_id: str = ""
     # Day 3: gap detection + briefing
@@ -97,7 +93,7 @@ class BotSettings:
             craig_api_key=os.getenv("CRAIG_API_KEY", ""),
             craig_api_base=os.getenv("CRAIG_API_BASE", "https://craig.chat/api"),
             obsidian_vault_path=vault_path,
-            whisper_model=os.getenv("WHISPER_MODEL", "base"),
+            speechmatics_api_key=os.getenv("SPEECHMATICS_API_KEY", ""),
             plane_api_token=os.getenv("PLANE_API_TOKEN", ""),
             plane_project_id=os.getenv("PLANE_PROJECT_ID", ""),
             gap_detection_hours=int(os.getenv("GAP_DETECTION_HOURS", "24")),
@@ -110,15 +106,34 @@ def _detect_plane_cli() -> bool:
     return shutil.which("plane") is not None
 
 
-def create_client(settings: BotSettings):
-    if discord is None:
-        raise RuntimeError("discord.py must be installed to create the Discord client")
+def _send_action(proc: subprocess.Popen, action: dict) -> None:
+    """Write a JSON action to discli's stdin."""
+    proc.stdin.write(json.dumps(action) + "\n")
+    proc.stdin.flush()
 
-    intents = discord.Intents.default()
-    intents.message_content = True
-    client = discord.Client(intents=intents)
 
-    router = NineRouterClient(api_key=settings.ninerouter_api_key, model=settings.llm_model, endpoint=settings.ninerouter_endpoint)
+def _add_reaction(proc: subprocess.Popen, channel_id: str, message_id: str, emoji: str) -> None:
+    """Add a reaction to a message via discli CLI command."""
+    subprocess.run(
+        ["discli", "-y", "reaction", "add", channel_id, message_id, emoji],
+        capture_output=True,
+        text=True,
+    )
+
+
+def run() -> None:
+    """Run the sync-sme bot using discli serve mode."""
+    logging.basicConfig(level=logging.INFO)
+    settings = BotSettings.from_env()
+
+    if not settings.discord_bot_token:
+        raise RuntimeError("DISCORD_BOT_TOKEN is required")
+
+    router = NineRouterClient(
+        api_key=settings.ninerouter_api_key,
+        model=settings.llm_model,
+        endpoint=settings.ninerouter_endpoint,
+    )
     parser = TaskParser(router=router)
 
     # Plane issue creator — try CLI first, fall back to dry-run
@@ -141,21 +156,26 @@ def create_client(settings: BotSettings):
     briefing_generator = DailyBriefingGenerator(router=router)
     obsidian = ObsidianWriter(vault_path=Path(settings.obsidian_vault_path)) if settings.obsidian_vault_path else None
 
+    def add_reaction(channel_id: str, message_id: str, emoji: str) -> None:
+        """Callback for the handler to add reactions."""
+        _add_reaction(None, channel_id, message_id, emoji)
+
     on_message = build_message_handler(
         task_parser=parser,
         plane_client=plane,
         state_store=state_store,
         action_items_channel=settings.action_items_channel,
         gap_tracker=gap_tracker,
+        add_reaction=add_reaction,
     )
 
     # Day 2: Meeting pipeline
     summarizer = MeetingSummarizer(router=router)
     meeting_pipeline = None
-    if settings.craig_api_key and obsidian:
+    if settings.craig_api_key and settings.speechmatics_api_key and obsidian:
         craig_client = CraigClient(api_key=settings.craig_api_key, base_url=settings.craig_api_base)
         recorder = CraigRecorder(client=craig_client)
-        transcriber = WhisperTranscriber(model_name=settings.whisper_model)
+        transcriber = SpeechmaticsTranscriber(api_key=settings.speechmatics_api_key)
         meeting_pipeline = MeetingPipeline(
             recorder=recorder,
             transcriber=transcriber,
@@ -163,23 +183,33 @@ def create_client(settings: BotSettings):
             obsidian=obsidian,
             plane=plane,
         )
-        logger.info("Meeting pipeline wired: Craig → Whisper → Obsidian → Plane")
+        logger.info("Meeting pipeline wired: Craig → Speechmatics → Obsidian → Plane")
 
-    # Day 3: Scheduled daily briefing task
-    @tasks.loop(hours=24)
-    async def daily_briefing_task():
+    # Status summary
+    print("sync-sme starting (discli serve mode)")
+    features = []
+    if meeting_pipeline:
+        features.append("Meeting pipeline: ACTIVE")
+    else:
+        features.append("Meeting pipeline: DISABLED")
+    features.append(f"Gap detection: ACTIVE ({settings.gap_detection_hours}h window)")
+    features.append(f"Daily briefing: {settings.briefing_cron_hour:02d}:{settings.briefing_cron_minute:02d} MYT")
+    if obsidian:
+        features.append(f"Obsidian vault: {settings.obsidian_vault_path}")
+    else:
+        features.append("Obsidian: DISABLED")
+    for f in features:
+        print(f"  {f}")
+
+    # Daily briefing scheduler (background thread)
+    def _run_daily_briefing() -> None:
         """Generate and post the daily briefing."""
         if not obsidian:
-            logger.warning("Obsidian not configured — skipping daily briefing")
             return
-
         candidates = gap_detector.detect()
         gaps_section = gap_detector.format_briefing_section(candidates)
-
-        # TODO: Pull real pending tasks from Plane API when available
         pending_tasks = "Plane integration pending — set PLANE_API_TOKEN to enable."
         upcoming_deadlines = "No deadline data available yet."
-
         try:
             briefing, path = briefing_generator.generate_and_write(
                 pending_tasks=pending_tasks,
@@ -191,48 +221,108 @@ def create_client(settings: BotSettings):
         except Exception:
             logger.exception("Failed to generate daily briefing")
 
-    @daily_briefing_task.before_loop
-    async def before_daily_briefing():
-        """Wait until the bot is ready before starting the briefing loop."""
-        await client.wait_until_ready()
+    def _briefing_loop() -> None:
+        """Background loop that runs the daily briefing."""
+        import time
+        while True:
+            time.sleep(24 * 60 * 60)  # 24 hours
+            _run_daily_briefing()
 
-    @client.event
-    async def on_ready():
-        print(f"Logged in as {client.user}")
+    briefing_thread = threading.Thread(target=_briefing_loop, daemon=True)
+    briefing_thread.start()
 
-        # Status summary
-        features = []
-        if meeting_pipeline:
-            features.append("Meeting pipeline: ACTIVE")
-        else:
-            features.append("Meeting pipeline: DISABLED")
-        features.append(f"Gap detection: ACTIVE ({settings.gap_detection_hours}h window)")
-        features.append(f"Daily briefing: {settings.briefing_cron_hour:02d}:{settings.briefing_cron_minute:02d} MYT")
-        if obsidian:
-            features.append(f"Obsidian vault: {settings.obsidian_vault_path}")
-        else:
-            features.append("Obsidian: DISABLED")
-        for f in features:
-            print(f"  {f}")
+    # --- discli serve mode event loop ---
+    logger.info("Starting discli serve mode...")
+    proc = subprocess.Popen(
+        ["discli", "--json", "serve"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
 
-        # Start the daily briefing scheduler
-        if not daily_briefing_task.is_running():
-            daily_briefing_task.start()
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON from discli: %s", line[:100])
+                continue
 
-    @client.event
-    async def on_message(message):
-        await on_message(message)
+            event_type = event.get("event")
 
-    return client
+            if event_type == "ready":
+                bot_name = event.get("bot_name", "unknown")
+                logger.info("Bot connected as %s", bot_name)
+                continue
+
+            if event_type == "message":
+                # Skip bot's own messages
+                if event.get("is_bot"):
+                    continue
+
+                # Extract fields from discli event
+                channel_name = event.get("channel_name", "")
+                message_id = str(event.get("message_id", ""))
+                content = event.get("content", "")
+                author_name = event.get("author", "")
+                is_mention = event.get("mentions_bot", False)
+
+                # Build a lightweight message-like object for the handler
+                msg = _DiscliMessage(
+                    id=message_id,
+                    content=content,
+                    channel_name=channel_name,
+                    author_name=author_name,
+                    is_bot=False,
+                )
+
+                result = on_message(msg)
+                logger.info("Message %s → %s", message_id, result)
+
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        proc.terminate()
+        proc.wait()
 
 
-def run() -> None:
-    logging.basicConfig(level=logging.INFO)
-    settings = BotSettings.from_env()
-    if not settings.discord_bot_token:
-        raise RuntimeError("DISCORD_BOT_TOKEN is required")
-    client = create_client(settings)
-    client.run(settings.discord_bot_token)
+class _DiscliMessage:
+    """Lightweight message adapter for discli events."""
+
+    __slots__ = ("id", "content", "_channel_name", "_author_name", "_is_bot")
+
+    def __init__(self, id: str, content: str, channel_name: str, author_name: str, is_bot: bool) -> None:
+        self.id = id
+        self.content = content
+        self._channel_name = channel_name
+        self._author_name = author_name
+        self._is_bot = is_bot
+
+    @property
+    def channel(self) -> _DiscliChannel:
+        return _DiscliChannel(self._channel_name)
+
+    @property
+    def author(self) -> _DiscliAuthor:
+        return _DiscliAuthor(self._author_name, self._is_bot)
+
+
+class _DiscliChannel:
+    __slots__ = ("name",)
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _DiscliAuthor:
+    __slots__ = ("name", "display_name", "bot")
+    def __init__(self, name: str, is_bot: bool) -> None:
+        self.name = name
+        self.display_name = name
+        self.bot = is_bot
 
 
 if __name__ == "__main__":  # pragma: no cover

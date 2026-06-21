@@ -3,7 +3,6 @@
 Covers: very long messages, messages with only images, edited messages.
 """
 
-import asyncio
 from dataclasses import dataclass, field
 
 from bot.handlers import build_message_handler
@@ -12,37 +11,47 @@ from llm.parser import ParsedTask
 from test_handlers import FakeParser, FakePlane, FakeStateStore, FakeAuthor, FakeChannel, FakeMessage
 
 
+def _make_reaction_tracker():
+    reactions = []
+
+    def add_reaction(channel_id: str, message_id: str, emoji: str):
+        reactions.append((channel_id, message_id, emoji))
+
+    return add_reaction, reactions
+
+
 def test_handler_processes_very_long_message():
     """A message exceeding Discord's 2000-char limit should still be parsed if actionable."""
     long_content = "todo: " + "A" * 3000  # Simulates a very long task description
     parser = FakeParser(ParsedTask(title="Long task"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
     message = FakeMessage(id=100, content=long_content)
 
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "created"
     assert len(parser.messages) == 1
     assert parser.messages[0] == long_content
-    assert message.reactions == ["✅"]
+    assert reactions == [("action-items", "100", "✅")]
 
 
 def test_handler_processes_message_with_only_image_attachment():
     """A message with only an image (no text) should be ignored as non-actionable."""
-    # Discord messages with only attachments have empty content
     parser = FakeParser(ParsedTask(title="Should not parse"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
     message = FakeMessage(id=101, content="")
 
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "ignored-non-actionable"
     assert plane.created == []
-    assert message.reactions == []
+    assert reactions == []
 
 
 def test_handler_processes_image_with_actionable_caption():
@@ -50,15 +59,15 @@ def test_handler_processes_image_with_actionable_caption():
     parser = FakeParser(ParsedTask(title="Fix this bug", details="See screenshot"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
-    # In Discord, the caption is the message content; the image is an attachment
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
     message = FakeMessage(id=102, content="todo: fix this bug — see attached screenshot")
 
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "created"
     assert plane.created == [ParsedTask(title="Fix this bug", details="See screenshot")]
-    assert message.reactions == ["✅"]
+    assert reactions == [("action-items", "102", "✅")]
 
 
 def test_handler_processes_edited_message_only_once():
@@ -66,20 +75,21 @@ def test_handler_processes_edited_message_only_once():
     parser = FakeParser(ParsedTask(title="Updated task"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
 
     # First delivery of the message
     message_v1 = FakeMessage(id=103, content="todo: deploy the app")
-    result1 = asyncio.run(handler(message_v1))
+    result1 = handler(message_v1)
 
     # Edited message with same ID (Discord reuses the same message ID on edits)
     message_v2 = FakeMessage(id=103, content="todo: deploy the app to staging")
-    result2 = asyncio.run(handler(message_v2))
+    result2 = handler(message_v2)
 
     assert result1 == "created"
     assert result2 == "ignored-duplicate"
     assert len(plane.created) == 1  # Only one issue created
-    assert store.processed == {103}
+    assert store.processed == {"103"}
 
 
 def test_handler_processes_unicode_message():
@@ -87,14 +97,15 @@ def test_handler_processes_unicode_message():
     parser = FakeParser(ParsedTask(title="完成部署"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
     message = FakeMessage(id=104, content="todo: 完成部署到生产环境")
 
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "created"
     assert plane.created == [ParsedTask(title="完成部署")]
-    assert message.reactions == ["✅"]
+    assert reactions == [("action-items", "104", "✅")]
 
 
 def test_handler_processes_message_with_mentions():
@@ -102,14 +113,15 @@ def test_handler_processes_message_with_mentions():
     parser = FakeParser(ParsedTask(title="Review PR", assignee="<@12345>"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
     message = FakeMessage(id=105, content="assign to <@12345>: review the PR")
 
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "created"
     assert parser.messages[0] == "assign to <@12345>: review the PR"
-    assert message.reactions == ["✅"]
+    assert reactions == [("action-items", "105", "✅")]
 
 
 def test_handler_multiple_trigger_keywords_in_one_message():
@@ -117,11 +129,12 @@ def test_handler_multiple_trigger_keywords_in_one_message():
     parser = FakeParser(ParsedTask(title="Follow up on deadline"))
     plane = FakePlane()
     store = FakeStateStore()
-    handler = build_message_handler(parser, plane, store)
+    react, reactions = _make_reaction_tracker()
+    handler = build_message_handler(parser, plane, store, add_reaction=react)
     message = FakeMessage(id=106, content="need to follow up on the deadline for todo list review")
 
-    result = asyncio.run(handler(message))
+    result = handler(message)
 
     assert result == "created"
     assert len(plane.created) == 1
-    assert message.reactions == ["✅"]
+    assert reactions == [("action-items", "106", "✅")]
