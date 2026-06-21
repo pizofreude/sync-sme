@@ -52,6 +52,9 @@ class BotSettings:
     gap_detection_hours: int = 24
     briefing_cron_hour: int = 9
     briefing_cron_minute: int = 0
+    # Day 4: Discord channel IDs for proactive posting (optional)
+    discord_alerts_channel_id: str = ""
+    discord_briefing_channel_id: str = ""
 
     @classmethod
     def from_env(cls) -> "BotSettings":
@@ -99,6 +102,8 @@ class BotSettings:
             gap_detection_hours=int(os.getenv("GAP_DETECTION_HOURS", "24")),
             briefing_cron_hour=cron_hour,
             briefing_cron_minute=cron_minute,
+            discord_alerts_channel_id=os.getenv("DISCORD_ALERTS_CHANNEL_ID", ""),
+            discord_briefing_channel_id=os.getenv("DISCORD_BRIEFING_CHANNEL_ID", ""),
         )
 
 
@@ -116,6 +121,21 @@ def _add_reaction(proc: subprocess.Popen, channel_id: str, message_id: str, emoj
     """Add a reaction to a message via discli CLI command."""
     subprocess.run(
         ["discli", "-y", "reaction", "add", channel_id, message_id, emoji],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _post_discord_message(channel_id: str, content: str) -> None:
+    """Post a message to a Discord channel via discli CLI command.
+
+    Requires DISCORD_ALERTS_CHANNEL_ID or DISCORD_BRIEFING_CHANNEL_ID to be set.
+    If discli does not support this subcommand, the call fails silently.
+    """
+    if not channel_id:
+        return
+    subprocess.run(
+        ["discli", "-y", "message", "send", channel_id, content],
         capture_output=True,
         text=True,
     )
@@ -198,15 +218,28 @@ def run() -> None:
         features.append(f"Obsidian vault: {settings.obsidian_vault_path}")
     else:
         features.append("Obsidian: DISABLED")
+    if settings.discord_alerts_channel_id:
+        features.append(f"Gap alerts → Discord #{settings.discord_alerts_channel_id}")
+    if settings.discord_briefing_channel_id:
+        features.append(f"Daily briefing → Discord #{settings.discord_briefing_channel_id}")
     for f in features:
         print(f"  {f}")
 
     # Daily briefing scheduler (background thread)
     def _run_daily_briefing() -> None:
-        """Generate and post the daily briefing."""
+        """Generate briefing → Obsidian, post gap alerts + summary to Discord."""
         if not obsidian:
             return
+
         candidates = gap_detector.detect()
+
+        # Post gap alerts to Discord #gap-alerts channel
+        if candidates and settings.discord_alerts_channel_id:
+            alert = gap_detector.format_alert(candidates)
+            if alert:
+                _post_discord_message(settings.discord_alerts_channel_id, alert)
+                logger.info("Gap alert posted to Discord channel %s", settings.discord_alerts_channel_id)
+
         gaps_section = gap_detector.format_briefing_section(candidates)
         pending_tasks = "Plane integration pending — set PLANE_API_TOKEN to enable."
         upcoming_deadlines = "No deadline data available yet."
@@ -218,6 +251,11 @@ def run() -> None:
                 obsidian=obsidian,
             )
             logger.info("Daily briefing written to %s", path)
+
+            # Also post briefing summary to Discord #daily-briefing channel
+            if settings.discord_briefing_channel_id:
+                _post_discord_message(settings.discord_briefing_channel_id, briefing)
+                logger.info("Daily briefing posted to Discord channel %s", settings.discord_briefing_channel_id)
         except Exception:
             logger.exception("Failed to generate daily briefing")
 
