@@ -121,4 +121,4 @@ PYTHONPATH=src python -m bot.client
 
 ## License
 
-MIT
+Apache 2.0
